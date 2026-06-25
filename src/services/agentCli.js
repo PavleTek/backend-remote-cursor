@@ -1,6 +1,5 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { dirname } from "node:path";
-import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -125,63 +124,6 @@ export async function sendPrompt({
   };
 }
 
-/**
- * Spawn the Cursor Agent CLI with streaming JSON output.
- * Calls onEvent for each parsed JSON line from stdout.
- * Returns the child process so the caller can kill it on disconnect.
- */
-export function streamPrompt({ prompt, model, mode, workspace, chatId, onEvent }) {
-  const args = [
-    "--print",
-    "--force",
-    "--output-format",
-    "stream-json",
-    "--stream-partial-output",
-  ];
-
-  if (mode === "ask" || mode === "plan") {
-    args.push("--mode", mode);
-  }
-  // agent mode is the CLI default — no --mode flag needed
-
-  if (model && model !== "auto") args.push("--model", model);
-
-  const workspaceDir = workspace && isFilePath(workspace) ? dirname(workspace) : workspace;
-  if (workspaceDir) args.push("--workspace", workspaceDir);
-
-  if (chatId) args.push("--resume", chatId);
-
-  args.push(prompt);
-
-  const child = spawn(AGENT_PATH, args, {
-    cwd: workspaceDir || undefined,
-    env: process.env,
-  });
-
-  const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-
-  rl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    try {
-      onEvent(JSON.parse(trimmed));
-    } catch {
-      // skip malformed lines
-    }
-  });
-
-  child.on("error", (err) => {
-    onEvent({ type: "error", error: err.message });
-  });
-
-  child.on("close", (code) => {
-    if (code !== 0) {
-      onEvent({ type: "process_exit", code });
-    }
-  });
-
-  return child;
-}
 
 function isFilePath(p) {
   return p.endsWith(".code-workspace") || p.endsWith(".json");

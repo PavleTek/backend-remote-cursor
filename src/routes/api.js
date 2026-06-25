@@ -5,7 +5,6 @@ import {
   getAgentStatus,
   listModels,
   sendPrompt,
-  streamPrompt,
 } from "../services/agentCli.js";
 import { getChatTranscript, listChats, listWorkspaces, resolveWorkspacePath } from "../services/cursorData.js";
 import {
@@ -14,6 +13,15 @@ import {
 } from "../services/favoriteModels.js";
 import { getTunnelState } from "../services/tunnelState.js";
 import { readWorkspaceConfig, writeWorkspaceConfig } from "../services/workspacesConfig.js";
+import { AcpClient } from "../services/acpClient.js";
+import {
+  addPending,
+  cleanupTurn,
+  getTurn,
+  registerTurn,
+  setSessionId,
+  takePending,
+} from "../services/acpSessions.js";
 
 const router = Router();
 
@@ -144,6 +152,8 @@ router.get("/workspaces/config", async (_req, res) => {
   }
 });
 
+// ── ACP streaming prompt ──────────────────────────────────────────────────────
+
 router.post("/prompt/stream", async (req, res) => {
   const { prompt, model, mode, workspace, workspaceSlug, chatId } = req.body ?? {};
 
@@ -174,10 +184,6 @@ router.post("/prompt/stream", async (req, res) => {
   res.flushHeaders();
 
   let ended = false;
-  // Tracks text already forwarded for the current assistant reply.
-  // stream-json with --stream-partial-output may emit incremental chunks and/or
-  // repeated cumulative assistant events (with or without timestamp_ms).
-  let assistantTextSent = "";
 
   function sendSse(name, data) {
     if (ended) return;
@@ -190,65 +196,180 @@ router.post("/prompt/stream", async (req, res) => {
     res.end();
   }
 
-  const child = streamPrompt({
-    prompt: prompt.trim(),
-    model,
-    mode: resolvedMode,
-    workspace: resolvedWorkspace,
-    chatId,
-    onEvent(event) {
-      if (event.type === "system" && event.subtype === "init") {
-        sendSse("session", { chatId: event.session_id, model: event.model });
-      } else if (event.type === "assistant") {
-        const content = event.message?.content;
-        if (Array.isArray(content)) {
-          for (const part of content) {
-            if (part.type === "text" && part.text) {
-              let delta;
-              if (part.text.startsWith(assistantTextSent)) {
-                // Cumulative snapshot — forward only the unsent suffix
-                delta = part.text.slice(assistantTextSent.length);
-              } else {
-                // Incremental chunk
-                delta = part.text;
-              }
-              if (delta) {
-                sendSse("text", { delta });
-                assistantTextSent += delta;
-              }
-            } else if (part.type === "tool_use") {
-              if (part.name === "CreatePlan") {
-                sendSse("plan", {
-                  name: part.input?.name ?? "",
-                  overview: part.input?.overview ?? "",
-                  plan: part.input?.plan ?? "",
-                  todos: part.input?.todos ?? [],
-                });
-              } else if (part.name === "TodoWrite") {
-                sendSse("todos", { todos: part.input?.todos ?? [] });
-              }
-            }
-          }
-        }
-      } else if (event.type === "result") {
-        sendSse("done", { result: event.result, ok: !event.is_error });
-        endSse();
-      } else if (event.type === "error") {
-        sendSse("error", { error: event.error });
-        endSse();
-      } else if (event.type === "process_exit" && event.code !== 0) {
-        sendSse("error", { error: `Agent process exited with code ${event.code}` });
-        endSse();
-      }
-    },
+  function pingSse() {
+    if (ended) return;
+    res.write(": ping\n\n");
+  }
+
+  const client = new AcpClient();
+  client.spawn({ workspace: resolvedWorkspace });
+
+  const turnId = registerTurn({ client, sendSse, endSse, pingRes: pingSse });
+
+  // First SSE event carries the turnId so the frontend can address reply endpoints
+  sendSse("turn", { turnId });
+
+  // Wire ACP events → SSE events
+  client.on("session", ({ chatId: returnedId, model: returnedModel }) => {
+    setSessionId(turnId, returnedId);
+    sendSse("session", { chatId: returnedId, model: returnedModel });
+  });
+
+  client.on("text", ({ delta }) => {
+    sendSse("text", { delta });
+  });
+
+  client.on("plan", ({ requestId, _jsonrpcId, name, overview, plan, todos, phases }) => {
+    addPending(turnId, requestId, _jsonrpcId, "plan");
+    sendSse("plan", { requestId, name, overview, plan, todos, phases });
+  });
+
+  client.on("question", ({ requestId, _jsonrpcId, title, questions }) => {
+    addPending(turnId, requestId, _jsonrpcId, "question");
+    sendSse("question", { requestId, title, questions });
+  });
+
+  client.on("todos", ({ todos, merge }) => {
+    sendSse("todos", { todos, merge });
+  });
+
+  client.on("done", ({ stopReason }) => {
+    sendSse("done", { result: stopReason ?? "end_turn", ok: true });
+    endSse();
+    cleanupTurn(turnId);
+  });
+
+  client.on("error", ({ error }) => {
+    sendSse("error", { error });
+    endSse();
+    cleanupTurn(turnId);
   });
 
   res.on("close", () => {
     if (ended) return;
     ended = true;
-    child.kill();
+    cleanupTurn(turnId);
+  });
+
+  // Start the ACP session — the promise resolves/rejects after the agent finishes
+  client.runSession({
+    prompt: prompt.trim(),
+    mode: resolvedMode,
+    model,
+    workspace: resolvedWorkspace,
+    chatId,
+  }).catch((err) => {
+    sendSse("error", { error: err.message ?? "ACP session error" });
+    endSse();
+    cleanupTurn(turnId);
   });
 });
+
+// ── ACP reply endpoints ───────────────────────────────────────────────────────
+
+/**
+ * POST /api/acp/respond
+ * Submit the user's answers to a pending cursor/ask_question blocking request.
+ *
+ * Body: { turnId, requestId, answers: [{ questionId, selectedOptionIds[] }] }
+ */
+router.post("/acp/respond", (req, res) => {
+  const { turnId, requestId, answers } = req.body ?? {};
+
+  if (!turnId || !requestId) {
+    return res.status(400).json({ ok: false, error: "turnId and requestId are required" });
+  }
+
+  const turn = getTurn(turnId);
+  if (!turn) {
+    return res.status(404).json({ ok: false, error: "Turn not found or already completed" });
+  }
+
+  const pending = takePending(turnId, requestId);
+  if (!pending) {
+    return res.status(404).json({ ok: false, error: "No pending question for that requestId" });
+  }
+
+  turn.client.respond(pending.jsonrpcId, {
+    outcome: {
+      outcome: "answered",
+      answers: answers ?? [],
+    },
+  });
+
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/acp/plan-decision
+ * Accept or reject a pending cursor/create_plan blocking request.
+ *
+ * Body: { turnId, requestId, decision: "accepted"|"rejected", reason?: string }
+ */
+router.post("/acp/plan-decision", (req, res) => {
+  const { turnId, requestId, decision, reason } = req.body ?? {};
+
+  if (!turnId || !requestId) {
+    return res.status(400).json({ ok: false, error: "turnId and requestId are required" });
+  }
+  if (!["accepted", "rejected"].includes(decision)) {
+    return res.status(400).json({ ok: false, error: "decision must be 'accepted' or 'rejected'" });
+  }
+
+  const turn = getTurn(turnId);
+  if (!turn) {
+    return res.status(404).json({ ok: false, error: "Turn not found or already completed" });
+  }
+
+  const pending = takePending(turnId, requestId);
+  if (!pending) {
+    return res.status(404).json({ ok: false, error: "No pending plan for that requestId" });
+  }
+
+  const outcome =
+    decision === "accepted"
+      ? { outcome: "accepted" }
+      : { outcome: "rejected", reason: reason ?? "" };
+
+  turn.client.respond(pending.jsonrpcId, { outcome });
+
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/acp/cancel
+ * Cancel an active turn and terminate its agent subprocess.
+ *
+ * Body: { turnId }
+ */
+router.post("/acp/cancel", async (req, res) => {
+  const { turnId } = req.body ?? {};
+
+  if (!turnId) {
+    return res.status(400).json({ ok: false, error: "turnId is required" });
+  }
+
+  const turn = getTurn(turnId);
+  if (!turn) {
+    return res.status(404).json({ ok: false, error: "Turn not found or already completed" });
+  }
+
+  // Send session/cancel if we have a session id
+  if (turn.sessionId) {
+    try {
+      await turn.client.send("session/cancel", { sessionId: turn.sessionId });
+    } catch {
+      // ignore — we'll kill regardless
+    }
+  }
+
+  try { turn.endSse(); } catch { /* ignore */ }
+  cleanupTurn(turnId);
+
+  res.json({ ok: true });
+});
+
+// ── Non-streaming prompt (unchanged) ─────────────────────────────────────────
 
 router.post("/prompt", async (req, res) => {
   const { prompt, model, mode, workspace, workspaceSlug, chatId, outputFormat } = req.body ?? {};
@@ -263,8 +384,6 @@ router.post("/prompt", async (req, res) => {
   const validModes = ["agent", "ask", "plan"];
   const resolvedMode = validModes.includes(mode) ? mode : "agent";
 
-  // Prefer workspaceSlug (Cursor slug) over raw workspace path.
-  // Resolve slug → real filesystem path so the agent CLI can use it.
   let resolvedWorkspace = workspace || null;
   if (workspaceSlug) {
     const overrides = await readWorkspaceConfig();
