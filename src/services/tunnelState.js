@@ -1,4 +1,6 @@
 let state = {
+  dev: false,
+  backendUrl: null,
   ngrokUrl: null,
   connectUrl: null,
   ready: false,

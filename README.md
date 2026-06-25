@@ -51,9 +51,22 @@ npm install
 cp .env.example .env
 ```
 
-Edit `.env`. The one value you **must** set for the QR connect flow is `FRONTEND_BASE_URL` (see below).
+Edit `.env`:
 
-For local-only testing without a phone tunnel:
+- **`DEV=false`** (default): production — ngrok tunnel + `FRONTEND_BASE_URL` (your deployed frontend).
+- **`DEV=true`**: local testing — no ngrok; connect URL uses `http://localhost:{PORT}` as backend and `DEV_FRONTEND_BASE_URL` (default `http://localhost:5173`) as frontend.
+
+For local dev with connect URL + QR (recommended):
+
+```bash
+# In .env
+DEV=true
+DEV_FRONTEND_BASE_URL=http://localhost:5173
+```
+
+Start the Vite frontend in another terminal (`npm run dev` in `frontend-remote-cursor`), then start the backend. Open the connect link or scan the QR on the same machine.
+
+To skip connect URL and QR entirely:
 
 ```bash
 SKIP_NGROK=true npm start
@@ -88,9 +101,14 @@ npm start
 On start (unless `SKIP_NGROK=true`):
 
 1. Express listens on `PORT` (default **3847**)
-2. ngrok starts automatically (`ngrok http 3847`)
-3. A connect URL is built: `{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}`
-4. A QR code opens in **Preview.app** — scan it with your phone
+2. **If `DEV=true`:** builds `http://localhost:{PORT}` as backend URL (no ngrok)
+3. **If `DEV=false`:** ngrok starts automatically (`ngrok http 3847`)
+4. A connect URL is built and a QR code opens in **Preview.app**
+
+| Mode | Connect URL shape |
+|------|-------------------|
+| `DEV=false` | `{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}` |
+| `DEV=true` | `{DEV_FRONTEND_BASE_URL}/connect?backend=http://localhost:{PORT}` |
 
 The PNG is always written to the same file, `data/connect-qr.png` (gitignored), and overwritten on each start — no temp-file buildup.
 
@@ -102,15 +120,42 @@ npm run restart
 lsof -ti:3847 | xargs kill -9 && npm start
 ```
 
-### 5. Connect your phone
+### 5. Connect
 
-1. Scan the QR code (or open the connect URL on your phone).
-2. The frontend saves the ngrok backend URL and opens Chat.
-3. You only need to re-scan when the ngrok URL changes (free tier rotates URLs on restart).
+**Production (`DEV=false`):** scan the QR on your phone. Re-scan when the ngrok URL changes (free tier rotates on restart).
+
+**Local dev (`DEV=true`):** open the connect link in your browser on the same Mac (or scan QR locally). Both frontend and backend must be running on localhost.
+
+---
+
+## DEV mode (local testing)
+
+Set `DEV=true` in `.env` to test the full connect flow without ngrok:
+
+```env
+DEV=true
+DEV_FRONTEND_BASE_URL=http://localhost:5173
+PORT=3847
+```
+
+Example connect URL:
+
+```
+http://localhost:5173/connect?backend=http://localhost:3847
+```
+
+- **No ngrok** is started or required.
+- **`FRONTEND_BASE_URL` is ignored** — use `DEV_FRONTEND_BASE_URL` instead (defaults to Vite dev server on port 5173).
+- The QR code and `data/connect-qr.png` use the same localhost URLs.
+- `GET /api/tunnel` returns `dev: true`, `backendUrl`, and `connectUrl` (with `ngrokUrl: null`).
+
+Set `DEV=false` for normal phone use with ngrok and your deployed frontend.
 
 ---
 
 ## What is `FRONTEND_BASE_URL`?
+
+Used when **`DEV=false`** only.
 
 This backend runs **only on your Mac** (`localhost:3847`). Your phone cannot reach it directly — ngrok creates a temporary public HTTPS URL that forwards to your Mac.
 
@@ -183,8 +228,10 @@ npm start
 |----------|---------|-------------|
 | `PORT` | `3847` | Local HTTP port |
 | `AGENT_PATH` | `agent` | Path to Cursor Agent CLI |
-| `FRONTEND_BASE_URL` | — | Deployed frontend origin (no trailing slash). Used to build `{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}` for the QR code. See [What is FRONTEND_BASE_URL?](#what-is-frontend_base_url) |
-| `SKIP_NGROK` | — | Set `true` to skip ngrok + QR on startup |
+| `DEV` | `false` | `true` = localhost connect URLs, no ngrok. `false` = ngrok + production frontend |
+| `FRONTEND_BASE_URL` | — | Deployed frontend origin when `DEV=false`. See [What is FRONTEND_BASE_URL?](#what-is-frontend_base_url) |
+| `DEV_FRONTEND_BASE_URL` | `http://localhost:5173` | Local frontend origin when `DEV=true` |
+| `SKIP_NGROK` | — | Set `true` to skip connect URL + QR on startup |
 | `SKIP_QR` | — | Set `true` to start ngrok but skip opening Preview |
 | `NGROK_BIN` | `ngrok` | Path to ngrok binary |
 | `FAVORITE_MODELS_PATH` | `data/favorite-models.json` | Path to favorite models config |
@@ -202,7 +249,8 @@ backend-remote-cursor/
 │   ├── workspaces.json         # Curated workspace overrides (auto-created)
 │   └── connect-qr.png          # Latest connect QR (auto-created, gitignored)
 ├── src/
-│   ├── index.js                # Express app, CORS, ngrok startup
+│   ├── index.js                # Express app, CORS, connect setup on startup
+│   ├── config.js               # DEV flag, frontend/backend URL resolution
 │   ├── routes/
 │   │   └── api.js              # HTTP routes
 │   └── services/
@@ -230,7 +278,7 @@ All routes are under `/api`. CORS allows any origin and the header `ngrok-skip-b
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/health` | Service health check |
-| `GET` | `/api/tunnel` | Current ngrok URL and phone connect link |
+| `GET` | `/api/tunnel` | Connect state: `dev`, `backendUrl`, `ngrokUrl`, `connectUrl` |
 
 ### Agent CLI
 

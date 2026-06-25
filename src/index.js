@@ -2,10 +2,11 @@ import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import apiRouter from "./routes/api.js";
-import { shutdownTunnel, startTunnel } from "./services/tunnel.js";
+import { getPort, isDev } from "./config.js";
+import { shutdownTunnel, startConnect } from "./services/tunnel.js";
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3847;
+const PORT = getPort();
 const SKIP_NGROK = process.env.SKIP_NGROK === "true";
 
 app.use(
@@ -26,6 +27,7 @@ app.use((_req, res) => {
 const server = app.listen(PORT, async () => {
   console.log(`Remote Cursor backend listening on http://localhost:${PORT}`);
   console.log(`Agent CLI: ${process.env.AGENT_PATH || "agent"}`);
+  console.log(`DEV mode: ${isDev() ? "on (localhost connect URLs)" : "off (ngrok)"}`);
 
   if (SKIP_NGROK) {
     console.log("SKIP_NGROK=true — tunnel and QR setup skipped");
@@ -33,10 +35,14 @@ const server = app.listen(PORT, async () => {
   }
 
   try {
-    await startTunnel(PORT);
+    await startConnect(PORT);
   } catch (error) {
-    console.error("Tunnel setup failed:", error.message);
-    console.error("Set FRONTEND_BASE_URL in .env and ensure ngrok is installed.");
+    console.error("Connect setup failed:", error.message);
+    if (isDev()) {
+      console.error("Check DEV_FRONTEND_BASE_URL in .env (default: http://localhost:5173).");
+    } else {
+      console.error("Set FRONTEND_BASE_URL in .env and ensure ngrok is installed.");
+    }
   }
 });
 
