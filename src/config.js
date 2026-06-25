@@ -29,3 +29,7 @@ export function getFrontendBaseUrl() {
 export function getLocalBackendUrl() {
   return `http://localhost:${PORT}`;
 }
+
+export function getApiKey() {
+  return process.env.API_KEY?.trim() || "";
+}

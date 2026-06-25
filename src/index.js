@@ -2,7 +2,8 @@ import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import apiRouter from "./routes/api.js";
-import { getPort, isDev } from "./config.js";
+import { getApiKey, getPort, isDev } from "./config.js";
+import { requireApiKey } from "./middleware/requireApiKey.js";
 import { shutdownTunnel, startConnect } from "./services/tunnel.js";
 
 const app = express();
@@ -13,11 +14,12 @@ app.use(
   cors({
     origin: true,
     credentials: true,
-    allowedHeaders: ["Content-Type", "ngrok-skip-browser-warning"],
+    allowedHeaders: ["Content-Type", "ngrok-skip-browser-warning", "X-API-Key"],
   }),
 );
 app.use(express.json({ limit: "1mb" }));
 
+app.use("/api", requireApiKey);
 app.use("/api", apiRouter);
 
 app.use((_req, res) => {
@@ -28,6 +30,11 @@ const server = app.listen(PORT, async () => {
   console.log(`Remote Cursor backend listening on http://localhost:${PORT}`);
   console.log(`Agent CLI: ${process.env.AGENT_PATH || "agent"}`);
   console.log(`DEV mode: ${isDev() ? "on (localhost connect URLs)" : "off (ngrok)"}`);
+  if (getApiKey()) {
+    console.log("API key auth: enabled");
+  } else {
+    console.warn("API key auth: disabled (set API_KEY in .env to restrict access)");
+  }
 
   if (SKIP_NGROK) {
     console.log("SKIP_NGROK=true — tunnel and QR setup skipped");
