@@ -95,14 +95,17 @@ export async function sendPrompt({
   }
 
   if (model && model !== "auto") args.push("--model", model);
-  if (workspace) args.push("--workspace", workspace);
+
+  // agent --workspace expects a directory (or saved workspace name), not a file path.
+  // For .code-workspace / workspace.json files, pass the containing directory.
+  const workspaceDir = workspace && isFilePath(workspace) ? dirname(workspace) : workspace;
+  if (workspaceDir) args.push("--workspace", workspaceDir);
+
   if (chatId) args.push("--resume", chatId);
 
   args.push(prompt);
 
-  // cwd must be a directory; .code-workspace and workspace.json are files
-  const cwd = workspace && isFilePath(workspace) ? dirname(workspace) : workspace;
-  const result = await runAgent(args, { cwd });
+  const result = await runAgent(args, { cwd: workspaceDir });
 
   let data = stripAnsi(result.stdout);
   if (outputFormat === "json" && result.stdout) {
