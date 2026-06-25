@@ -440,9 +440,16 @@ export async function listChats({ workspaceSlug, q, limit = 200 } = {}) {
 
 /**
  * Load the full transcript for a single chat.
+ * Also extracts the latest CreatePlan and TodoWrite tool calls so the frontend
+ * can restore the plan card when reopening a conversation.
  *
  * @param {{ workspaceSlug: string, chatId: string }} opts
- * @returns {Promise<{ id: string, workspaceSlug: string, messages: Array<{role:string,text:string}> }>}
+ * @returns {Promise<{
+ *   id: string,
+ *   workspaceSlug: string,
+ *   messages: Array<{role:string,text:string}>,
+ *   plan: {name:string,overview:string,plan:string,todos:Array<{id:string,content:string,status:string}>}|null,
+ * }>}
  */
 export async function getChatTranscript({ workspaceSlug, chatId }) {
   if (!SAFE_CHAT_ID.test(chatId)) {
@@ -473,18 +480,49 @@ export async function getChatTranscript({ workspaceSlug, chatId }) {
 
   const lines = await readJsonlLines(jsonlFile);
   const messages = [];
+  let latestPlan = null;
 
   for (const obj of lines) {
     if (obj.role !== "user" && obj.role !== "assistant") continue;
+
+    // Extract text parts for the messages list
     const text = extractText(obj);
-    if (!text) continue;
-    const cleaned = obj.role === "user" ? cleanUserText(text) : stripRedacted(text);
-    if (cleaned) {
-      messages.push({ role: obj.role, text: cleaned });
+    if (text) {
+      const cleaned = obj.role === "user" ? cleanUserText(text) : stripRedacted(text);
+      if (cleaned) {
+        messages.push({ role: obj.role, text: cleaned });
+      }
+    }
+
+    // Extract tool_use parts for plan/todo tracking
+    if (obj.role === "assistant") {
+      const toolPlan = extractToolUse(obj, "CreatePlan");
+      if (toolPlan) {
+        latestPlan = {
+          name: toolPlan.name ?? "",
+          overview: toolPlan.overview ?? "",
+          plan: toolPlan.plan ?? "",
+          todos: (toolPlan.todos ?? []).map((t) => ({
+            id: t.id ?? crypto.randomUUID(),
+            content: t.content ?? "",
+            status: t.status ?? "pending",
+          })),
+        };
+      }
+
+      const todoWrite = extractToolUse(obj, "TodoWrite");
+      if (todoWrite && latestPlan && Array.isArray(todoWrite.todos)) {
+        // Merge updated statuses into the plan's todos list
+        const statusMap = new Map(todoWrite.todos.map((t) => [t.id, t.status]));
+        latestPlan.todos = latestPlan.todos.map((t) => ({
+          ...t,
+          status: statusMap.has(t.id) ? statusMap.get(t.id) : t.status,
+        }));
+      }
     }
   }
 
-  return { id: chatId, workspaceSlug, messages };
+  return { id: chatId, workspaceSlug, messages, plan: latestPlan };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -527,6 +565,18 @@ function extractText(obj) {
     }
   }
   return "";
+}
+
+/** Extract the input of the first tool_use block with the given name, or null. */
+function extractToolUse(obj, toolName) {
+  const content = obj.message?.content;
+  if (!Array.isArray(content)) return null;
+  for (const part of content) {
+    if (part.type === "tool_use" && part.name === toolName && part.input) {
+      return part.input;
+    }
+  }
+  return null;
 }
 
 /** Strip <user_query> wrapper tags that the agent injects. */

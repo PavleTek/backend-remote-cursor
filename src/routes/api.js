@@ -5,6 +5,7 @@ import {
   getAgentStatus,
   listModels,
   sendPrompt,
+  streamPrompt,
 } from "../services/agentCli.js";
 import { getChatTranscript, listChats, listWorkspaces, resolveWorkspacePath } from "../services/cursorData.js";
 import {
@@ -141,6 +142,96 @@ router.get("/workspaces/config", async (_req, res) => {
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   }
+});
+
+router.post("/prompt/stream", async (req, res) => {
+  const { prompt, model, mode, workspace, workspaceSlug, chatId } = req.body ?? {};
+
+  if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+    return res.status(400).json({ ok: false, error: "prompt is required" });
+  }
+
+  const validModes = ["agent", "ask", "plan"];
+  const resolvedMode = validModes.includes(mode) ? mode : "agent";
+
+  let resolvedWorkspace = workspace || null;
+  if (workspaceSlug) {
+    const overrides = await readWorkspaceConfig();
+    const path = await resolveWorkspacePath(workspaceSlug, overrides);
+    if (!path) {
+      return res.status(400).json({
+        ok: false,
+        error: `Could not resolve workspace path for "${workspaceSlug}". Add a path override in data/workspaces.json.`,
+      });
+    }
+    resolvedWorkspace = path;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  let ended = false;
+
+  function sendSse(name, data) {
+    if (ended) return;
+    res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  function endSse() {
+    if (ended) return;
+    ended = true;
+    res.end();
+  }
+
+  const child = streamPrompt({
+    prompt: prompt.trim(),
+    model,
+    mode: resolvedMode,
+    workspace: resolvedWorkspace,
+    chatId,
+    onEvent(event) {
+      if (event.type === "system" && event.subtype === "init") {
+        sendSse("session", { chatId: event.session_id, model: event.model });
+      } else if (event.type === "assistant") {
+        const content = event.message?.content;
+        if (Array.isArray(content)) {
+          for (const part of content) {
+            if (part.type === "text" && part.text) {
+              sendSse("text", { delta: part.text });
+            } else if (part.type === "tool_use") {
+              if (part.name === "CreatePlan") {
+                sendSse("plan", {
+                  name: part.input?.name ?? "",
+                  overview: part.input?.overview ?? "",
+                  plan: part.input?.plan ?? "",
+                  todos: part.input?.todos ?? [],
+                });
+              } else if (part.name === "TodoWrite") {
+                sendSse("todos", { todos: part.input?.todos ?? [] });
+              }
+            }
+          }
+        }
+      } else if (event.type === "result") {
+        sendSse("done", { result: event.result, ok: !event.is_error });
+        endSse();
+      } else if (event.type === "error") {
+        sendSse("error", { error: event.error });
+        endSse();
+      } else if (event.type === "process_exit" && event.code !== 0) {
+        sendSse("error", { error: `Agent process exited with code ${event.code}` });
+        endSse();
+      }
+    },
+  });
+
+  req.on("close", () => {
+    ended = true;
+    child.kill();
+  });
 });
 
 router.post("/prompt", async (req, res) => {
