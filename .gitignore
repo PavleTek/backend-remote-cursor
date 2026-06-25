@@ -4,4 +4,4 @@ node_modules/
 *.log
 data/workspaces.json
 data/connect-qr.png
-src/services/favoriteModels.js
+data/favorite-models.json
