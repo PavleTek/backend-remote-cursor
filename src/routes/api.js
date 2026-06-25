@@ -175,8 +175,8 @@ router.post("/prompt/stream", async (req, res) => {
 
   let ended = false;
   // Tracks text already forwarded for the current assistant reply.
-  // stream-json with --stream-partial-output emits incremental chunks (timestamp_ms)
-  // and then a final cumulative assistant event without timestamp_ms.
+  // stream-json with --stream-partial-output may emit incremental chunks and/or
+  // repeated cumulative assistant events (with or without timestamp_ms).
   let assistantTextSent = "";
 
   function sendSse(name, data) {
@@ -205,13 +205,11 @@ router.post("/prompt/stream", async (req, res) => {
           for (const part of content) {
             if (part.type === "text" && part.text) {
               let delta;
-              if (event.timestamp_ms != null) {
-                // Incremental chunk from --stream-partial-output
-                delta = part.text;
-              } else if (part.text.startsWith(assistantTextSent)) {
-                // Final cumulative event — only forward unsent suffix
+              if (part.text.startsWith(assistantTextSent)) {
+                // Cumulative snapshot — forward only the unsent suffix
                 delta = part.text.slice(assistantTextSent.length);
               } else {
+                // Incremental chunk
                 delta = part.text;
               }
               if (delta) {
