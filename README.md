@@ -29,19 +29,59 @@ The frontend lives in a separate repo: `frontend-remote-cursor`. The backend URL
 ## Requirements
 
 - macOS with [Cursor Agent CLI](https://cursor.com) installed (`agent` on PATH)
-- Logged in: `agent login`
-- [ngrok](https://ngrok.com) installed (for phone access)
+- [ngrok](https://ngrok.com) installed and authenticated (for phone access)
 - Node.js ≥ 20
+- A deployed instance of `frontend-remote-cursor` (e.g. on Railway), or a local frontend dev server for testing
 
 ---
 
-## Quick start
+## Setup
+
+### 1. Install dependencies
+
+```bash
+git clone <this-repo>
+cd backend-remote-cursor
+npm install
+```
+
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env — set FRONTEND_BASE_URL to your deployed frontend URL
+```
 
-npm install
+Edit `.env`. The one value you **must** set for the QR connect flow is `FRONTEND_BASE_URL` (see below).
+
+For local-only testing without a phone tunnel:
+
+```bash
+SKIP_NGROK=true npm start
+```
+
+### 3. Set up the Cursor Agent CLI
+
+The backend shells out to the `agent` command. Verify it works **in your terminal** before relying on the HTTP API:
+
+```bash
+# Log in (opens browser if needed)
+agent login
+
+# Confirm you are logged in
+agent status
+
+# List available models
+agent models
+
+# Smoke test — should print a response within a few seconds
+agent --print --force --mode ask --model composer-2.5-fast "Reply with exactly: pong"
+```
+
+If any of these hang or fail, fix the CLI locally first (see [macOS permissions gotcha](#macos-permissions-gotcha) below).
+
+### 4. Start the backend
+
+```bash
 npm start
 ```
 
@@ -55,8 +95,84 @@ On start (unless `SKIP_NGROK=true`):
 If port 3847 is already in use:
 
 ```bash
-lsof -ti:3847 | xargs kill -9
+npm run restart
+# or manually:
+lsof -ti:3847 | xargs kill -9 && npm start
+```
+
+### 5. Connect your phone
+
+1. Scan the QR code (or open the connect URL on your phone).
+2. The frontend saves the ngrok backend URL and opens Chat.
+3. You only need to re-scan when the ngrok URL changes (free tier rotates URLs on restart).
+
+---
+
+## What is `FRONTEND_BASE_URL`?
+
+This backend runs **only on your Mac** (`localhost:3847`). Your phone cannot reach it directly — ngrok creates a temporary public HTTPS URL that forwards to your Mac.
+
+The phone UI lives in a **separate deployed frontend** (`frontend-remote-cursor`, e.g. on Railway). `FRONTEND_BASE_URL` is that deployed frontend’s origin — **no trailing slash**.
+
+| Example | Meaning |
+|---------|---------|
+| `https://your-app.up.railway.app` | Production frontend on Railway |
+| `http://192.168.1.10:5173` | Local Vite dev server on your LAN (testing only) |
+
+**Why the backend needs it:** on startup, the backend builds a **connect link** that pairs your phone with this Mac:
+
+```
+{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}
+```
+
+For example:
+
+```
+https://your-app.up.railway.app/connect?backend=https://abc123.ngrok-free.app
+```
+
+That URL is encoded in the QR code. When your phone opens it:
+
+1. The **frontend** loads (Railway / your host).
+2. The `?backend=` query param tells the frontend which ngrok URL to save as the API base.
+3. The frontend redirects you to Chat — no manual URL copying.
+
+If `FRONTEND_BASE_URL` is missing, startup fails when building the connect link. The backend itself never serves the UI; it only needs to know where the UI lives so the QR points to the right place.
+
+---
+
+## macOS permissions gotcha
+
+On macOS, the Agent CLI may **hang or appear stuck** when invoked by this backend (or even from a fresh terminal) until macOS has prompted you for the right permissions.
+
+**Symptom:** `agent status` works, but prompts time out, return nothing, or the subprocess never exits when run headlessly (`--print --force`).
+
+**Fix:** run a prompt **once, interactively in Terminal.app** (not only through the backend):
+
+```bash
+agent --print --force --mode ask --model composer-2.5-fast "Reply with exactly: hello"
+```
+
+macOS will usually show one or more permission dialogs (e.g. Terminal accessing files, automation, or related privacy prompts). **Accept them.**
+
+After that, the same commands invoked by this backend over HTTP/SSE tend to work reliably. If things break again after a macOS update or CLI reinstall, repeat the local terminal test.
+
+This is a macOS + CLI quirk, not a bug in the ngrok or Express layer — always confirm the CLI works locally before debugging the remote stack.
+
+---
+
+## Quick start (TL;DR)
+
+```bash
+cp .env.example .env
+# Set FRONTEND_BASE_URL in .env
+
+npm install
+agent login && agent status
+agent --print --force --mode ask --model composer-2.5-fast "Reply with exactly: pong"
+
 npm start
+# Scan QR on phone
 ```
 
 ### Environment variables
@@ -65,7 +181,7 @@ npm start
 |----------|---------|-------------|
 | `PORT` | `3847` | Local HTTP port |
 | `AGENT_PATH` | `agent` | Path to Cursor Agent CLI |
-| `FRONTEND_BASE_URL` | — | Deployed frontend URL (no trailing slash). Used for QR connect links |
+| `FRONTEND_BASE_URL` | — | Deployed frontend origin (no trailing slash). Used to build `{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}` for the QR code. See [What is FRONTEND_BASE_URL?](#what-is-frontend_base_url) |
 | `SKIP_NGROK` | — | Set `true` to skip ngrok + QR on startup |
 | `SKIP_QR` | — | Set `true` to start ngrok but skip opening Preview |
 | `NGROK_BIN` | `ngrok` | Path to ngrok binary |
@@ -237,13 +353,13 @@ These are now implemented via filesystem reads — see the Workspaces and Chat h
 
 ## Debugging agent locally
 
-Mirror what the backend runs:
+Mirror what the backend runs. If these fail, see [macOS permissions gotcha](#macos-permissions-gotcha) before chasing ngrok or API issues.
 
 ```bash
 # Quick test
 agent --print --force --mode ask --model composer-2.5-fast "Reply with exactly: pong"
 
-# Live streaming output
+# Live streaming output (what POST /api/prompt/stream uses)
 agent --print --force --output-format stream-json --stream-partial-output --mode ask "your prompt"
 
 # Resume a chat
@@ -253,8 +369,16 @@ agent --print --force --resume YOUR_CHAT_ID "follow-up prompt"
 Check login and models:
 
 ```bash
+agent login    # if status shows not logged in
 agent status
 agent models
+```
+
+Test the backend directly (backend must be running):
+
+```bash
+curl -s http://localhost:3847/api/health
+curl -s http://localhost:3847/api/status
 ```
 
 ---
