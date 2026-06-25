@@ -1,8 +1,8 @@
 {
   "favorites": [
     "composer-2.5-fast",
-    "composer-2.5",
+    "claude-4.6-sonnet-medium-thinking",
     "claude-opus-4-8-thinking-high",
-    "claude-4.6-sonnet-medium-thinking"
+    "composer-2.5"
   ]
 }
