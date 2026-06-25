@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { dirname } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -99,7 +100,9 @@ export async function sendPrompt({
 
   args.push(prompt);
 
-  const result = await runAgent(args, { cwd: workspace });
+  // cwd must be a directory; .code-workspace and workspace.json are files
+  const cwd = workspace && isFilePath(workspace) ? dirname(workspace) : workspace;
+  const result = await runAgent(args, { cwd });
 
   let data = stripAnsi(result.stdout);
   if (outputFormat === "json" && result.stdout) {
@@ -116,6 +119,10 @@ export async function sendPrompt({
     stderr: stripAnsi(result.stderr),
     data,
   };
+}
+
+function isFilePath(p) {
+  return p.endsWith(".code-workspace") || p.endsWith(".json");
 }
 
 function stripAnsi(text) {

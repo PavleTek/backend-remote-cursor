@@ -6,7 +6,7 @@ import {
   listModels,
   sendPrompt,
 } from "../services/agentCli.js";
-import { getChatTranscript, listChats, listWorkspaces } from "../services/cursorData.js";
+import { getChatTranscript, listChats, listWorkspaces, resolveWorkspacePath } from "../services/cursorData.js";
 import {
   getFavoriteModelsEnriched,
   writeFavoriteIds,
@@ -144,7 +144,7 @@ router.get("/workspaces/config", async (_req, res) => {
 });
 
 router.post("/prompt", async (req, res) => {
-  const { prompt, model, mode, workspace, chatId, outputFormat } = req.body ?? {};
+  const { prompt, model, mode, workspace, workspaceSlug, chatId, outputFormat } = req.body ?? {};
 
   if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
     return res.status(400).json({
@@ -156,11 +156,26 @@ router.post("/prompt", async (req, res) => {
   const validModes = ["agent", "ask", "plan"];
   const resolvedMode = validModes.includes(mode) ? mode : "agent";
 
+  // Prefer workspaceSlug (Cursor slug) over raw workspace path.
+  // Resolve slug → real filesystem path so the agent CLI can use it.
+  let resolvedWorkspace = workspace || null;
+  if (workspaceSlug) {
+    const overrides = await readWorkspaceConfig();
+    const path = await resolveWorkspacePath(workspaceSlug, overrides);
+    if (!path) {
+      return res.status(400).json({
+        ok: false,
+        error: `Could not resolve workspace path for "${workspaceSlug}". Add a path override in data/workspaces.json.`,
+      });
+    }
+    resolvedWorkspace = path;
+  }
+
   const result = await sendPrompt({
     prompt: prompt.trim(),
     model,
     mode: resolvedMode,
-    workspace,
+    workspace: resolvedWorkspace,
     chatId,
     outputFormat: outputFormat === "json" ? "json" : "text",
   });
