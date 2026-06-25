@@ -5,7 +5,7 @@ import {
   stopNgrok,
   waitForNgrokUrl,
 } from "./ngrok.js";
-import { showConnectQrInPreview } from "./qrDisplay.js";
+import { getQrCodePath, showConnectQrInPreview } from "./qrDisplay.js";
 import { getTunnelState, setTunnelState } from "./tunnelState.js";
 
 export async function startTunnel(port) {
@@ -38,7 +38,7 @@ export async function startTunnel(port) {
   if (process.env.SKIP_QR !== "true") {
     try {
       await showConnectQrInPreview(connectUrl);
-      console.log("QR code opened in Preview — scan with your phone");
+      console.log(`QR code saved to ${getQrCodePath()} and opened in Preview`);
     } catch (error) {
       console.warn("Could not open QR in Preview:", error.message);
       console.log("Scan this URL manually:", connectUrl);

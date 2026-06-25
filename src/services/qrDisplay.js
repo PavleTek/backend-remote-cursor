@@ -1,11 +1,16 @@
 import { execFile } from "node:child_process";
-import { writeFile, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import QRCode from "qrcode";
 
 const execFileAsync = promisify(execFile);
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const qrPath =
+  process.env.QR_CODE_PATH || join(__dirname, "../../data/connect-qr.png");
 
 async function openInPreviewCentered(pngPath) {
   const escapedPath = pngPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
@@ -43,28 +48,21 @@ end tell
   await execFileAsync("osascript", ["-e", script]);
 }
 
+export function getQrCodePath() {
+  return qrPath;
+}
+
 export async function showConnectQrInPreview(connectUrl) {
-  const pngPath = join(tmpdir(), `remote-cursor-connect-${Date.now()}.png`);
+  const pngBuffer = await QRCode.toBuffer(connectUrl, {
+    type: "png",
+    width: 640,
+    margin: 2,
+    errorCorrectionLevel: "M",
+  });
 
-  try {
-    const pngBuffer = await QRCode.toBuffer(connectUrl, {
-      type: "png",
-      width: 640,
-      margin: 2,
-      errorCorrectionLevel: "M",
-    });
+  await mkdir(dirname(qrPath), { recursive: true });
+  await writeFile(qrPath, pngBuffer);
+  await openInPreviewCentered(qrPath);
 
-    await writeFile(pngPath, pngBuffer);
-    await openInPreviewCentered(pngPath);
-
-    // Preview copies the file on open; remove our temp copy shortly after.
-    setTimeout(() => {
-      unlink(pngPath).catch(() => {});
-    }, 5000);
-
-    return pngPath;
-  } catch (error) {
-    await unlink(pngPath).catch(() => {});
-    throw error;
-  }
+  return qrPath;
 }

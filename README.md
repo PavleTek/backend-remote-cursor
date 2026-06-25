@@ -92,6 +92,8 @@ On start (unless `SKIP_NGROK=true`):
 3. A connect URL is built: `{FRONTEND_BASE_URL}/connect?backend={ngrokUrl}`
 4. A QR code opens in **Preview.app** — scan it with your phone
 
+The PNG is always written to the same file, `data/connect-qr.png` (gitignored), and overwritten on each start — no temp-file buildup.
+
 If port 3847 is already in use:
 
 ```bash
@@ -187,6 +189,7 @@ npm start
 | `NGROK_BIN` | `ngrok` | Path to ngrok binary |
 | `FAVORITE_MODELS_PATH` | `data/favorite-models.json` | Path to favorite models config |
 | `WORKSPACES_CONFIG_PATH` | `data/workspaces.json` | Path to workspace curated overrides config |
+| `QR_CODE_PATH` | `data/connect-qr.png` | Path to connect QR PNG (overwritten each startup) |
 
 ---
 
@@ -196,7 +199,8 @@ npm start
 backend-remote-cursor/
 ├── data/
 │   ├── favorite-models.json    # Persisted favorite model IDs (Mac-side)
-│   └── workspaces.json         # Curated workspace overrides (auto-created)
+│   ├── workspaces.json         # Curated workspace overrides (auto-created)
+│   └── connect-qr.png          # Latest connect QR (auto-created, gitignored)
 ├── src/
 │   ├── index.js                # Express app, CORS, ngrok startup
 │   ├── routes/
