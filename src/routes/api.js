@@ -243,7 +243,8 @@ router.post("/prompt/stream", async (req, res) => {
     },
   });
 
-  req.on("close", () => {
+  res.on("close", () => {
+    if (ended) return;
     ended = true;
     child.kill();
   });
