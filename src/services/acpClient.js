@@ -17,6 +17,24 @@ function withTimeout(promise, ms, message) {
   ]);
 }
 
+function formatJsonRpcError(error) {
+  const message = error?.message ?? "ACP request failed";
+  const details = error?.data;
+  if (!details) return new Error(message);
+  if (typeof details === "string") return new Error(`${message}: ${details}`);
+  if (Array.isArray(details) && details.length > 0) {
+    const summary = details
+      .map((item) => item?.message ?? item?.path?.join?.(".") ?? JSON.stringify(item))
+      .filter(Boolean)
+      .join("; ");
+    return new Error(summary ? `${message}: ${summary}` : message);
+  }
+  if (typeof details === "object" && details.message) {
+    return new Error(`${message}: ${details.message}`);
+  }
+  return new Error(message);
+}
+
 /**
  * Thin JSON-RPC 2.0 client over stdio that speaks the Cursor ACP protocol.
  *
@@ -134,7 +152,7 @@ export class AcpClient extends EventEmitter {
       if (waiter) {
         this.#pending.delete(msg.id);
         msg.error
-          ? waiter.reject(new Error(msg.error.message ?? JSON.stringify(msg.error)))
+          ? waiter.reject(formatJsonRpcError(msg.error))
           : waiter.resolve(msg.result);
       }
       return;
@@ -233,22 +251,30 @@ export class AcpClient extends EventEmitter {
     );
 
     // 3. session/new or session/load
+    const newSessionParams = {
+      cwd: workspaceDir || process.cwd(),
+      mcpServers: [],
+      ...(mode && mode !== "agent" ? { mode } : {}),
+      ...(model && model !== "auto" ? { model } : {}),
+    };
+
     let sessionResult;
     if (chatId) {
-      sessionResult = await this.send("session/load", {
-        sessionId: chatId,
-        cwd: workspaceDir || process.cwd(),
-      });
+      try {
+        sessionResult = await this.send("session/load", {
+          sessionId: chatId,
+          cwd: workspaceDir || process.cwd(),
+          mcpServers: [],
+        });
+      } catch {
+        // chatId may be a CLI create-chat or transcript id, not an ACP session
+        sessionResult = await this.send("session/new", newSessionParams);
+      }
     } else {
-      sessionResult = await this.send("session/new", {
-        cwd: workspaceDir || process.cwd(),
-        mcpServers: [],
-        ...(mode && mode !== "agent" ? { mode } : {}),
-        ...(model && model !== "auto" ? { model } : {}),
-      });
+      sessionResult = await this.send("session/new", newSessionParams);
     }
 
-    this.#sessionId = sessionResult?.sessionId ?? null;
+    this.#sessionId = sessionResult?.sessionId ?? chatId ?? null;
     this.emit("session", {
       chatId: this.#sessionId,
       model: sessionResult?.model ?? model ?? null,
